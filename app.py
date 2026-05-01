@@ -632,76 +632,92 @@ elif page == "Live Prediction Tool":
         year = col3.number_input("Year", min_value=2000, max_value=2035, value=2026)
 
         submitted = st.form_submit_button("Generate Prediction")
+if "result" not in st.session_state:
+    st.session_state.result = None
 
-    if submitted:
-        try:
-            date_obj = datetime(int(year), int(month), int(day))
-            date_str = date_obj.strftime("%Y-%m-%d")
+if submitted:
+    try:
+        date_obj = datetime(int(year), int(month), int(day))
+        date_str = date_obj.strftime("%Y-%m-%d")
 
-            with st.spinner("Fetching coordinates, weather data, NASA image and running HydroPyro..."):
-                lat, lon, city = get_coords(place)
-                raw_weather_df = fetch_weather_dataframe(lat, lon, date_obj)
-                weather = normalize_weather(raw_weather_df)
-                img = fetch_nasa_image(lat, lon, date_obj)
-                probs, model_status = run_prediction(img, weather, raw_weather_df)
+        with st.spinner("Fetching coordinates, weather data, NASA image and running HydroPyro..."):
+            lat, lon, city = get_coords(place)
+            raw_weather_df = fetch_weather_dataframe(lat, lon, date_obj)
+            weather = normalize_weather(raw_weather_df)
+            img = fetch_nasa_image(lat, lon, date_obj)
+            probs, model_status = run_prediction(img, weather, raw_weather_df)
 
-                output = build_hydropyro_output(
-                    city=city,
-                    lat=lat,
-                    lon=lon,
-                    date_str=date_str,
-                    probs=probs,
-                    raw_weather_df=raw_weather_df,
-                    model_status=model_status
-                )
-
-            st.success(output["alert"])
-            st.caption(f"Model status: {output['model_status']}")
-
-            st.header("Risk Dashboard")
-
-            m1, m2, m3 = st.columns(3)
-
-            m1.metric("NORMAL", f"{output['risk_scores']['normal_probability'] * 100:.1f}%")
-            m2.metric("FIRE", f"{output['risk_scores']['fire_probability'] * 100:.1f}%")
-            m3.metric("FLOOD", f"{output['risk_scores']['flood_probability'] * 100:.1f}%")
-
-            d1, d2, d3, d4, d5, d6 = st.columns(6)
-
-            d1.metric("Dominant", output["dominant_output"])
-            d2.metric("Risk level", output["risk_level"])
-            d3.metric("Confidence", output["confidence"])
-            d4.metric("Trend", output["trend"])
-            d5.metric("Anomaly", output["anomaly"])
-            d6.metric("Priority", output["priority_rank"])
-
-            st.header("Interactive Map")
-
-            fmap = create_folium_map(lat, lon, city, output)
-            st_folium(fmap, width=1100, height=520)
-
-            st.header("Alert System")
-            st.warning(output["alert"])
-
-            st.header("Recommended Action")
-            st.write(output["recommended_action"])
-
-            st.header("Decision Justification")
-            st.write(output["decision_justification"])
-
-            with st.expander("Weather / Data Table"):
-                st.dataframe(raw_weather_df, use_container_width=True)
-
-            st.header("Download Report")
-
-            report_json = json.dumps(output, indent=2, ensure_ascii=False)
-
-            st.download_button(
-                "Download JSON Report",
-                data=report_json,
-                file_name=f"hydropyro_report_{city.lower().replace(' ', '_')}.json",
-                mime="application/json"
+            output = build_hydropyro_output(
+                city=city,
+                lat=lat,
+                lon=lon,
+                date_str=date_str,
+                probs=probs,
+                raw_weather_df=raw_weather_df,
+                model_status=model_status
             )
+
+            st.session_state.result = {
+                "output": output,
+                "lat": lat,
+                "lon": lon,
+                "city": city,
+                "raw_weather_df": raw_weather_df
+            }
+
+    except Exception as e:
+        st.error(f"Prediction failed: {e}")
+
+if st.session_state.result is not None:
+    output = st.session_state.result["output"]
+    lat = st.session_state.result["lat"]
+    lon = st.session_state.result["lon"]
+    city = st.session_state.result["city"]
+    raw_weather_df = st.session_state.result["raw_weather_df"]
+
+    st.success(output["alert"])
+    st.caption(f"Model status: {output['model_status']}")
+
+    st.header("Risk Dashboard")
+
+    m1, m2, m3 = st.columns(3)
+    m1.metric("NORMAL", f"{output['risk_scores']['normal_probability'] * 100:.1f}%")
+    m2.metric("FIRE", f"{output['risk_scores']['fire_probability'] * 100:.1f}%")
+    m3.metric("FLOOD", f"{output['risk_scores']['flood_probability'] * 100:.1f}%")
+
+    d1, d2, d3, d4, d5, d6 = st.columns(6)
+    d1.metric("Dominant", output["dominant_output"])
+    d2.metric("Risk level", output["risk_level"])
+    d3.metric("Confidence", output["confidence"])
+    d4.metric("Trend", output["trend"])
+    d5.metric("Anomaly", output["anomaly"])
+    d6.metric("Priority", output["priority_rank"])
+
+    st.header("Interactive Map")
+    fmap = create_folium_map(lat, lon, city, output)
+    st_folium(fmap, width=1100, height=520)
+
+    st.header("Alert System")
+    st.warning(output["alert"])
+
+    st.header("Recommended Action")
+    st.write(output["recommended_action"])
+
+    st.header("Decision Justification")
+    st.write(output["decision_justification"])
+
+    with st.expander("Weather / Data Table"):
+        st.dataframe(raw_weather_df, use_container_width=True)
+
+    st.header("Download Report")
+    report_json = json.dumps(output, indent=2, ensure_ascii=False)
+
+    st.download_button(
+        "Download JSON Report",
+        data=report_json,
+        file_name=f"hydropyro_report_{city.lower().replace(' ', '_')}.json",
+        mime="application/json"
+    )
 
             st.info("PDF report can be added later. Current MVP exports JSON.")
 
