@@ -3,6 +3,7 @@ numpy
 pandas
 requests
 pillow
+scikit-learn
 folium
 streamlit-folium
-scikit-learn
+tensorflow-cpu==2.12.0
