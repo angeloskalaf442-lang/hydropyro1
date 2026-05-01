@@ -144,9 +144,7 @@ def fetch_nasa_image(lat, lon, date_obj):
         return np.zeros((224, 224, 3), dtype=np.float32)
 
 
-def build_hybrid_model():
-    if not TF_AVAILABLE:
-        return None
+
 
     img_in = layers.Input(shape=(224, 224, 3), name="image_input")
 
@@ -182,10 +180,7 @@ def build_hybrid_model():
 
 
 @st.cache_resource
-def load_hydropyro_model():
-    if TF_AVAILABLE and os.path.exists(MODEL_OUT):
-        return tf.keras.models.load_model(MODEL_OUT)
-    return None
+
 
 
 def fallback_risk_prediction(raw_weather_df):
