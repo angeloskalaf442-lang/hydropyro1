@@ -5,5 +5,4 @@ requests
 pillow
 folium
 streamlit-folium
-tensorflow
 scikit-learn
