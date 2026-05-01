@@ -659,7 +659,8 @@ if submitted:
                 model_status=model_status
             )
 
-   if st.session_state.result is not None:
+if st.session_state.result:
+
     output = st.session_state.result["output"]
     lat = st.session_state.result["lat"]
     lon = st.session_state.result["lon"]
@@ -671,14 +672,24 @@ if submitted:
 
     st.header("Risk Dashboard")
 
-    m1, m2, m3 = st.columns(3)
-    m1.metric("NORMAL", f"{output['risk_scores']['normal_probability'] * 100:.1f}%")
-    m2.metric("FIRE", f"{output['risk_scores']['fire_probability'] * 100:.1f}%")
-    m3.metric("FLOOD", f"{output['risk_scores']['flood_probability'] * 100:.1f}%")
+    col1, col2, col3 = st.columns(3)
+
+    col1.metric("NORMAL", f"{output['risk_scores']['normal_probability'] * 100:.1f}%")
+    col2.metric("FIRE", f"{output['risk_scores']['fire_probability'] * 100:.1f}%")
+    col3.metric("FLOOD", f"{output['risk_scores']['flood_probability'] * 100:.1f}%")
 
     st.header("Download Report")
 
     report_json = json.dumps(output, indent=2, ensure_ascii=False)
+
+    st.download_button(
+        label="Download JSON Report",
+        data=report_json,
+        file_name=f"hydropyro_report_{city.lower().replace(' ', '_')}.json",
+        mime="application/json"
+    )
+
+    st.info("PDF report can be added later. Current MVP exports JSON.")
 
     st.download_button(
         label="Download JSON Report",
