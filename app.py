@@ -238,18 +238,18 @@ def fallback_risk_prediction(raw_weather_df):
 @st.cache_resource
 def load_tflite_model():
     try:
-        import tensorflow as tf
+        from ai_edge_litert.interpreter import Interpreter
 
         if os.path.exists("hydropyro_3class_model.tflite"):
-            interpreter = tf.lite.Interpreter(model_path="hydropyro_3class_model.tflite")
+            interpreter = Interpreter(model_path="hydropyro_3class_model.tflite")
             interpreter.allocate_tensors()
             return interpreter
 
         return None
 
-    except Exception:
+    except Exception as e:
+        st.error(f"TFLite/LiteRT loading error: {e}")
         return None
-
 
 def run_prediction(img, weather, raw_weather_df):
     interpreter = load_tflite_model()
