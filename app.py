@@ -1,3 +1,4 @@
+
 import os
 import json
 from io import BytesIO
@@ -11,12 +12,7 @@ from PIL import Image
 import folium
 from streamlit_folium import st_folium
 
-try:
-    import tensorflow as tf
-    from tensorflow.keras import layers, models
-    TF_AVAILABLE = True
-except Exception:
-    TF_AVAILABLE = False
+
 
 
 IMG_SIZE = (224, 224)
@@ -239,21 +235,47 @@ def fallback_risk_prediction(raw_weather_df):
     return probs
 
 
-def run_prediction(img, weather, raw_weather_df):
-    model = load_hydropyro_model()
+@st.cache_resource
+def load_tflite_model():
+    try:
+        import tensorflow as tf
 
-    if model is not None:
-        probs = model.predict(
-            {
-                "image_input": img[None, ...],
-                "sensor_input": weather[None, ...]
-            },
-            verbose=0
-        )[0]
-        return probs, "CNN-LSTM Keras model"
+        if os.path.exists("hydropyro_3class_model.tflite"):
+            interpreter = tf.lite.Interpreter(model_path="hydropyro_3class_model.tflite")
+            interpreter.allocate_tensors()
+            return interpreter
+
+        return None
+
+    except Exception:
+        return None
+
+
+def run_prediction(img, weather, raw_weather_df):
+    interpreter = load_tflite_model()
+
+    if interpreter is not None:
+        input_details = interpreter.get_input_details()
+        output_details = interpreter.get_output_details()
+
+        interpreter.set_tensor(
+            input_details[0]["index"],
+            img[None, ...].astype(np.float32)
+        )
+
+        interpreter.set_tensor(
+            input_details[1]["index"],
+            weather[None, ...].astype(np.float32)
+        )
+
+        interpreter.invoke()
+
+        probs = interpreter.get_tensor(output_details[0]["index"])[0]
+
+        return probs, "TFLite model"
 
     probs = fallback_risk_prediction(raw_weather_df)
-    return probs, "Fallback MVP logic — upload hydropyro_3class_model.keras for real model inference"
+    return probs, "Fallback MVP logic — TFLite model not loaded"
 
 
 def classify_level(prob, predicted_class):
