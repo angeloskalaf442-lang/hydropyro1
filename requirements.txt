@@ -6,3 +6,4 @@ pillow
 scikit-learn
 folium
 streamlit-folium
+tensorflow-cpu
