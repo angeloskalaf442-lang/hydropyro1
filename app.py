@@ -719,7 +719,7 @@ if st.session_state.result is not None:
         mime="application/json"
     )
 
-            st.info("PDF report can be added later. Current MVP exports JSON.")
+     st.info("PDF report can be added later. Current MVP exports JSON.")
 
         except Exception as e:
             st.error(f"Prediction failed: {e}")
