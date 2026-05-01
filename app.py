@@ -634,6 +634,8 @@ elif page == "Live Prediction Tool":
         submitted = st.form_submit_button("Generate Prediction")
 if "result" not in st.session_state:
     st.session_state.result = None
+if "result" not in st.session_state:
+    st.session_state.result = None
 
 if submitted:
     try:
@@ -657,18 +659,17 @@ if submitted:
                 model_status=model_status
             )
 
-            st.session_state.result = {
-                "output": output,
-                "lat": lat,
-                "lon": lon,
-                "city": city,
-                "raw_weather_df": raw_weather_df
-            }
+        st.session_state.result = {
+            "output": output,
+            "lat": lat,
+            "lon": lon,
+            "city": city,
+            "raw_weather_df": raw_weather_df
+        }
 
     except Exception as e:
         st.error(f"Prediction failed: {e}")
-
-if st.session_state.result is not None:
+        if st.session_state.result is not None:
     output = st.session_state.result["output"]
     lat = st.session_state.result["lat"]
     lon = st.session_state.result["lon"]
@@ -685,46 +686,17 @@ if st.session_state.result is not None:
     m2.metric("FIRE", f"{output['risk_scores']['fire_probability'] * 100:.1f}%")
     m3.metric("FLOOD", f"{output['risk_scores']['flood_probability'] * 100:.1f}%")
 
-    d1, d2, d3, d4, d5, d6 = st.columns(6)
-    d1.metric("Dominant", output["dominant_output"])
-    d2.metric("Risk level", output["risk_level"])
-    d3.metric("Confidence", output["confidence"])
-    d4.metric("Trend", output["trend"])
-    d5.metric("Anomaly", output["anomaly"])
-    d6.metric("Priority", output["priority_rank"])
+    st.header("Download Report")
+    report_json = json.dumps(output, indent=2, ensure_ascii=False)
 
-    st.header("Interactive Map")
-    fmap = create_folium_map(lat, lon, city, output)
-    st_folium(fmap, width=1100, height=520)
+    st.download_button(
+        label="Download JSON Report",
+        data=report_json,
+        file_name=f"hydropyro_report_{city.lower().replace(' ', '_')}.json",
+        mime="application/json"
+    )
 
-    st.header("Alert System")
-    st.warning(output["alert"])
-
-    st.header("Recommended Action")
-    st.write(output["recommended_action"])
-
-    st.header("Decision Justification")
-    st.write(output["decision_justification"])
-
-    with st.expander("Weather / Data Table"):
-        st.dataframe(raw_weather_df, use_container_width=True)
-
-   # Download section
-st.header("Download Report")
-
-report_json = json.dumps(output, indent=2, ensure_ascii=False)
-
-st.download_button(
-    label="Download JSON Report",
-    data=report_json,
-    file_name=f"hydropyro_report_{city.lower().replace(' ', '_')}.json",
-    mime="application/json"
-)
-
-st.info("PDF report can be added later. Current MVP exports JSON.")
-
-        except Exception as e:
-            st.error(f"Prediction failed: {e}")
+    st.info("PDF report can be added later. Current MVP exports JSON.")
 
 
 elif page == "Business Model":
