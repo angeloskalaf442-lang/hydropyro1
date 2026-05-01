@@ -6,3 +6,4 @@ pillow
 folium
 streamlit-folium
 scikit-learn
+ai-edge-litert
