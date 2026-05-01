@@ -1,4 +1,3 @@
-
 import os
 import json
 from io import BytesIO
@@ -13,13 +12,23 @@ import folium
 from streamlit_folium import st_folium
 
 
+# =============================
+# CONFIG
+# =============================
 
+st.set_page_config(
+    page_title="HydroPyro AI",
+    page_icon="🔥",
+    layout="wide"
+)
 
 IMG_SIZE = (224, 224)
 LSTM_SEQ_LEN = 30
 LSTM_FEATURES = 8
-MODEL_OUT = "hydropyro_3class_model.keras"
-HEADERS = {"User-Agent": "HydroPyro-MVP/2.0"}
+
+TFLITE_MODEL = "hydropyro_3class_model.tflite"
+
+HEADERS = {"User-Agent": "HydroPyro-MVP/3.0"}
 
 CLASS_NAMES = {
     0: "NORMAL",
@@ -50,14 +59,22 @@ WEATHER_MIN_MAX = {
 }
 
 
+# =============================
+# DATA FUNCTIONS
+# =============================
+
 def get_coords(query: str):
     url = "https://geocoding-api.open-meteo.com/v1/search"
     params = {"name": query, "count": 1, "language": "en", "format": "json"}
+
     r = requests.get(url, params=params, headers=HEADERS, timeout=15)
     r.raise_for_status()
+
     data = r.json().get("results")
+
     if not data:
         raise Exception("Location not found.")
+
     return float(data[0]["latitude"]), float(data[0]["longitude"]), data[0]["name"]
 
 
@@ -65,7 +82,11 @@ def fetch_weather_dataframe(lat, lon, date_obj):
     now = datetime.now()
     is_future = date_obj.date() > now.date()
 
-    url = "https://api.open-meteo.com/v1/forecast" if is_future else "https://archive-api.open-meteo.com/v1/archive"
+    url = (
+        "https://api.open-meteo.com/v1/forecast"
+        if is_future
+        else "https://archive-api.open-meteo.com/v1/archive"
+    )
 
     params = {
         "latitude": lat,
@@ -83,7 +104,9 @@ def fetch_weather_dataframe(lat, lon, date_obj):
     try:
         r = requests.get(url, params=params, headers=HEADERS, timeout=25)
         r.raise_for_status()
+
         hourly = r.json().get("hourly", {})
+
         if not hourly:
             return pd.DataFrame(columns=WEATHER_COLS)
 
@@ -120,6 +143,7 @@ def normalize_weather(df):
 
 def fetch_nasa_image(lat, lon, date_obj):
     q_date = min(date_obj, datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+
     url = "https://wvs.earthdata.nasa.gov/api/v1/snapshot"
     box = 0.2
 
@@ -137,6 +161,7 @@ def fetch_nasa_image(lat, lon, date_obj):
     try:
         r = requests.get(url, params=params, headers=HEADERS, timeout=25)
         r.raise_for_status()
+
         img = Image.open(BytesIO(r.content)).convert("RGB")
         return np.array(img.resize(IMG_SIZE), dtype=np.float32) / 255.0
 
@@ -144,43 +169,41 @@ def fetch_nasa_image(lat, lon, date_obj):
         return np.zeros((224, 224, 3), dtype=np.float32)
 
 
-
-
-    img_in = layers.Input(shape=(224, 224, 3), name="image_input")
-
-    x = layers.Conv2D(32, (3, 3), activation="relu", kernel_initializer="he_normal")(img_in)
-    x = layers.MaxPooling2D()(x)
-    x = layers.Conv2D(64, (3, 3), activation="relu")(x)
-    x = layers.MaxPooling2D()(x)
-    x = layers.Conv2D(96, (3, 3), activation="relu")(x)
-    x = layers.GlobalAveragePooling2D()(x)
-
-    seq_in = layers.Input(shape=(LSTM_SEQ_LEN, LSTM_FEATURES), name="sensor_input")
-
-    y = layers.LSTM(64, return_sequences=True)(seq_in)
-    y = layers.LSTM(32)(y)
-
-    combined = layers.Concatenate()([x, y])
-
-    z = layers.Dense(96, activation="relu")(combined)
-    z = layers.Dropout(0.35)(z)
-    z = layers.Dense(48, activation="relu")(z)
-    z = layers.Dropout(0.25)(z)
-
-    out = layers.Dense(3, activation="softmax", name="output")(z)
-
-    model = models.Model(inputs=[img_in, seq_in], outputs=out)
-    model.compile(
-        optimizer=tf.keras.optimizers.Adam(learning_rate=0.0007),
-        loss="sparse_categorical_crossentropy",
-        metrics=["accuracy"]
-    )
-
-    return model
-
+# =============================
+# MODEL LOADING
+# =============================
 
 @st.cache_resource
+def load_tflite_model():
+    """
+    Tries to load TFLite model.
+    If no compatible interpreter exists on Streamlit Cloud, it returns None safely.
+    """
+    if not os.path.exists(TFLITE_MODEL):
+        return None, "TFLite file not found in repository"
 
+    try:
+        from ai_edge_litert.interpreter import Interpreter
+        interpreter = Interpreter(model_path=TFLITE_MODEL)
+        interpreter.allocate_tensors()
+        return interpreter, "TFLite / LiteRT model"
+
+    except Exception as e1:
+        try:
+            from tflite_runtime.interpreter import Interpreter
+            interpreter = Interpreter(model_path=TFLITE_MODEL)
+            interpreter.allocate_tensors()
+            return interpreter, "TFLite Runtime model"
+
+        except Exception as e2:
+            try:
+                import tensorflow as tf
+                interpreter = tf.lite.Interpreter(model_path=TFLITE_MODEL)
+                interpreter.allocate_tensors()
+                return interpreter, "TensorFlow Lite model"
+
+            except Exception as e3:
+                return None, f"TFLite could not load: {e1} | {e2} | {e3}"
 
 
 def fallback_risk_prediction(raw_weather_df):
@@ -225,71 +248,64 @@ def fallback_risk_prediction(raw_weather_df):
     normal = max(0.05, 1.0 - max(fire, flood))
 
     probs = np.array([normal, fire, flood], dtype=np.float32)
-    probs = probs / probs.sum()
+    return probs / probs.sum()
 
-    return probs
-
-
-@st.cache_resource
-def load_tflite_model():
-    try:
-        from ai_edge_litert.interpreter import Interpreter
-
-        if os.path.exists("hydropyro_3class_model.tflite"):
-            interpreter = Interpreter(model_path="hydropyro_3class_model.tflite")
-            interpreter.allocate_tensors()
-            return interpreter
-
-        return None
-
-    except Exception as e:
-        st.error(f"TFLite/LiteRT loading error: {e}")
-        return None
 
 def run_prediction(img, weather, raw_weather_df):
-    interpreter = load_tflite_model()
+    interpreter, model_status = load_tflite_model()
 
     if interpreter is not None:
-        input_details = interpreter.get_input_details()
-        output_details = interpreter.get_output_details()
+        try:
+            input_details = interpreter.get_input_details()
+            output_details = interpreter.get_output_details()
 
-        interpreter.set_tensor(
-            input_details[0]["index"],
-            img[None, ...].astype(np.float32)
-        )
+            image_input = img[None, ...].astype(np.float32)
+            weather_input = weather[None, ...].astype(np.float32)
 
-        interpreter.set_tensor(
-            input_details[1]["index"],
-            weather[None, ...].astype(np.float32)
-        )
+            # Try normal input order
+            try:
+                interpreter.set_tensor(input_details[0]["index"], image_input)
+                interpreter.set_tensor(input_details[1]["index"], weather_input)
+            except Exception:
+                # Try reverse input order
+                interpreter.set_tensor(input_details[0]["index"], weather_input)
+                interpreter.set_tensor(input_details[1]["index"], image_input)
 
-        interpreter.invoke()
+            interpreter.invoke()
 
-        probs = interpreter.get_tensor(output_details[0]["index"])[0]
+            probs = interpreter.get_tensor(output_details[0]["index"])[0]
+            probs = np.array(probs, dtype=np.float32)
+            probs = probs / probs.sum()
 
-        return probs, "TFLite model"
+            return probs, model_status
+
+        except Exception as e:
+            probs = fallback_risk_prediction(raw_weather_df)
+            return probs, f"Fallback MVP logic — TFLite inference error: {e}"
 
     probs = fallback_risk_prediction(raw_weather_df)
-    return probs, "Fallback MVP logic — TFLite model not loaded"
+    return probs, f"Fallback MVP logic — {model_status}"
 
+
+# =============================
+# RISK LOGIC
+# =============================
 
 def classify_level(prob, predicted_class):
     if predicted_class == 0:
-        if prob >= 0.75:
-            return "LOW"
-        return "UNCERTAIN"
+        return "LOW" if prob >= 0.75 else "UNCERTAIN"
 
     if prob >= 0.85:
         return "EXTREME"
-    elif prob >= 0.70:
+    if prob >= 0.70:
         return "HIGH"
-    elif prob >= 0.45:
+    if prob >= 0.45:
         return "MEDIUM"
 
     return "LOW"
 
 
-def get_color(level, dominant_output=None):
+def get_color(level, dominant_output):
     if dominant_output == "NORMAL":
         return "green"
 
@@ -308,7 +324,7 @@ def confidence_score(probs):
 
     if gap >= 0.45:
         return "HIGH"
-    elif gap >= 0.20:
+    if gap >= 0.20:
         return "MEDIUM"
 
     return "LOW"
@@ -330,7 +346,7 @@ def detect_weather_trend(df, dominant_risk):
 
         if recent_rain > previous_rain * 1.5 and recent_rain > 1:
             return "INCREASING"
-        elif recent_rain < previous_rain * 0.7:
+        if recent_rain < previous_rain * 0.7:
             return "DECREASING"
 
         return "STABLE"
@@ -343,7 +359,7 @@ def detect_weather_trend(df, dominant_risk):
 
         if recent_temp > previous_temp + 2 and recent_rh < previous_rh:
             return "INCREASING"
-        elif recent_temp < previous_temp - 2 or recent_rh > previous_rh:
+        if recent_temp < previous_temp - 2 or recent_rh > previous_rh:
             return "DECREASING"
 
         return "STABLE"
@@ -364,17 +380,15 @@ def detect_anomaly(df, dominant_risk):
     if dominant_risk == "FLOOD":
         if rain >= 80 or soil >= 0.75:
             return "EXTREME_RAINFALL_OR_SOIL_MOISTURE_ANOMALY"
-        elif rain >= 30:
+        if rain >= 30:
             return "HEAVY_RAINFALL_ANOMALY"
-
         return "NO_MAJOR_ANOMALY"
 
     if dominant_risk == "FIRE":
         if temp >= 38 and rh <= 25 and wind >= 35:
             return "EXTREME_FIRE_WEATHER_ANOMALY"
-        elif temp >= 32 and rh <= 35:
+        if temp >= 32 and rh <= 35:
             return "FIRE_WEATHER_ANOMALY"
-
         return "NO_MAJOR_ANOMALY"
 
     return "NO_MAJOR_ANOMALY"
@@ -386,24 +400,16 @@ def generate_recommendation(dominant_risk, level):
 
     if dominant_risk == "FLOOD":
         if level in ["HIGH", "EXTREME"]:
-            return (
-                "Increase monitoring of drainage systems, low-lying zones, riverbeds and vulnerable infrastructure. "
-                "Prepare preventive civil-protection actions."
-            )
-        elif level == "MEDIUM":
+            return "Increase monitoring of drainage systems, low-lying zones, riverbeds and vulnerable infrastructure. Prepare preventive civil-protection actions."
+        if level == "MEDIUM":
             return "Monitor rainfall evolution and inspect flood-prone locations."
-
         return "Continue routine monitoring."
 
     if dominant_risk == "FIRE":
         if level in ["HIGH", "EXTREME"]:
-            return (
-                "Increase surveillance of vegetation zones, monitor wind evolution, prepare firefighting resources "
-                "and consider preventive restrictions on risky outdoor activity."
-            )
-        elif level == "MEDIUM":
+            return "Increase surveillance of vegetation zones, monitor wind evolution, prepare firefighting resources and consider preventive restrictions on risky outdoor activity."
+        if level == "MEDIUM":
             return "Monitor temperature, humidity and wind conditions. Prepare preventive checks."
-
         return "Continue routine monitoring."
 
     return "Continue monitoring."
@@ -420,25 +426,13 @@ def generate_justification(df, dominant_risk):
     soil_mean = df["soil_moisture_0_to_7cm"].mean()
 
     if dominant_risk == "NORMAL":
-        return (
-            f"Normal-risk output is supported by non-extreme observed conditions: "
-            f"{rain_sum:.1f} mm accumulated precipitation, {temp_max:.1f}°C maximum temperature, "
-            f"{rh_min:.1f}% minimum relative humidity, {wind_max:.1f} km/h maximum windspeed "
-            f"and {soil_mean:.2f} mean near-surface soil moisture."
-        )
+        return f"Normal-risk output is supported by non-extreme observed conditions: {rain_sum:.1f} mm precipitation, {temp_max:.1f}°C maximum temperature, {rh_min:.1f}% minimum humidity, {wind_max:.1f} km/h maximum windspeed and {soil_mean:.2f} mean soil moisture."
 
     if dominant_risk == "FLOOD":
-        return (
-            f"Flood risk is supported by accumulated precipitation of {rain_sum:.1f} mm, "
-            f"maximum windspeed of {wind_max:.1f} km/h and mean near-surface soil moisture of {soil_mean:.2f}."
-        )
+        return f"Flood risk is supported by accumulated precipitation of {rain_sum:.1f} mm, maximum windspeed of {wind_max:.1f} km/h and mean soil moisture of {soil_mean:.2f}."
 
     if dominant_risk == "FIRE":
-        return (
-            f"Fire risk is supported by maximum temperature of {temp_max:.1f}°C, "
-            f"minimum relative humidity of {rh_min:.1f}%, maximum windspeed of {wind_max:.1f} km/h "
-            f"and accumulated precipitation of {rain_sum:.1f} mm."
-        )
+        return f"Fire risk is supported by maximum temperature of {temp_max:.1f}°C, minimum relative humidity of {rh_min:.1f}%, maximum windspeed of {wind_max:.1f} km/h and accumulated precipitation of {rain_sum:.1f} mm."
 
     return "Risk justification unavailable."
 
@@ -449,10 +443,8 @@ def generate_alert(dominant_risk, level, city):
 
     if level == "EXTREME":
         return f"🚨 EXTREME {dominant_risk} RISK in {city}. Immediate preparedness review recommended."
-
     if level == "HIGH":
         return f"⚠️ HIGH {dominant_risk} RISK in {city}. Preventive monitoring recommended."
-
     if level == "MEDIUM":
         return f"⚠️ MEDIUM {dominant_risk} RISK in {city}. Conditions should be monitored."
 
@@ -473,18 +465,11 @@ def priority_rank(level, dominant_risk):
 
 
 def build_hydropyro_output(city, lat, lon, date_str, probs, raw_weather_df, model_status):
-    normal_prob = float(probs[0])
-    fire_prob = float(probs[1])
-    flood_prob = float(probs[2])
-
     predicted_class = int(np.argmax(probs))
     dominant_output = CLASS_NAMES[predicted_class]
     dominant_probability = float(np.max(probs))
 
     level = classify_level(dominant_probability, predicted_class)
-    trend = detect_weather_trend(raw_weather_df, dominant_output)
-    anomaly = detect_anomaly(raw_weather_df, dominant_output)
-    confidence = confidence_score(probs)
 
     output = {
         "location": {
@@ -494,34 +479,29 @@ def build_hydropyro_output(city, lat, lon, date_str, probs, raw_weather_df, mode
         },
         "date": date_str,
         "risk_scores": {
-            "normal_probability": round(normal_prob, 4),
-            "fire_probability": round(fire_prob, 4),
-            "flood_probability": round(flood_prob, 4)
+            "normal_probability": round(float(probs[0]), 4),
+            "fire_probability": round(float(probs[1]), 4),
+            "flood_probability": round(float(probs[2]), 4)
         },
         "dominant_output": dominant_output,
         "dominant_probability": round(dominant_probability, 4),
         "risk_level": level,
         "priority_rank": priority_rank(level, dominant_output),
         "alert": generate_alert(dominant_output, level, city),
-        "trend": trend,
-        "anomaly": anomaly,
-        "confidence": confidence,
+        "trend": detect_weather_trend(raw_weather_df, dominant_output),
+        "anomaly": detect_anomaly(raw_weather_df, dominant_output),
+        "confidence": confidence_score(probs),
         "recommended_action": generate_recommendation(dominant_output, level),
         "decision_justification": generate_justification(raw_weather_df, dominant_output),
         "model_status": model_status,
-        "model_note": (
-            "HydroPyro MVP output. This is a decision-support estimate and must not replace "
-            "official meteorological, hydrological or civil-protection assessment."
-        )
+        "model_note": "HydroPyro MVP output. This is a decision-support estimate and must not replace official meteorological, hydrological or civil-protection assessment."
     }
 
     return output
 
 
 def create_folium_map(lat, lon, city, output):
-    level = output["risk_level"]
-    dominant = output["dominant_output"]
-    color = get_color(level, dominant)
+    color = get_color(output["risk_level"], output["dominant_output"])
 
     m = folium.Map(location=[lat, lon], zoom_start=9)
 
@@ -549,33 +529,21 @@ def create_folium_map(lat, lon, city, output):
     return m
 
 
-st.set_page_config(
-    page_title="HydroPyro AI",
-    page_icon="🔥",
-    layout="wide"
-)
+# =============================
+# UI
+# =============================
 
 st.markdown(
     """
     <style>
     .main-title {
-        font-size: 54px;
-        font-weight: 800;
+        font-size: 56px;
+        font-weight: 900;
         margin-bottom: 0px;
     }
     .subtitle {
         font-size: 24px;
         color: #555;
-    }
-    .section-card {
-        padding: 22px;
-        border-radius: 18px;
-        background-color: #f7f7f8;
-        margin-bottom: 18px;
-    }
-    .small-muted {
-        color: #666;
-        font-size: 14px;
     }
     </style>
     """,
@@ -602,49 +570,44 @@ if page == "Landing Page":
     st.markdown('<div class="subtitle">AI wildfire & flood risk intelligence</div>', unsafe_allow_html=True)
 
     st.write("")
+    st.write(
+        """
+        HydroPyro is an AI-driven platform for integrated wildfire and flood risk prediction,
+        combining weather data, satellite imagery, geospatial indicators and machine-learning
+        intelligence for environmental decision support.
+        """
+    )
 
-    col1, col2 = st.columns([2, 1])
-
-    with col1:
-        st.markdown(
-            """
-            HydroPyro is an AI-driven platform for integrated wildfire and flood risk prediction,
-            combining weather data, satellite imagery, geospatial indicators and machine-learning
-            intelligence for environmental decision support.
-            """
-        )
-        st.button("Request Pilot / Book Demo")
-
-    with col2:
-        st.metric("Outputs", "NORMAL / FIRE / FLOOD")
-        st.metric("Use", "Decision Support")
-        st.metric("Status", "MVP Demo")
-
-    st.divider()
-
-    st.header("Core Website Features")
+    st.button("Request Pilot / Book Demo")
 
     c1, c2, c3 = st.columns(3)
-    c1.info("Live Prediction Tool")
-    c2.info("Risk Dashboard")
-    c3.info("Interactive Map")
+    c1.metric("Outputs", "NORMAL / FIRE / FLOOD")
+    c2.metric("Model", "TFLite-ready")
+    c3.metric("Status", "MVP Online")
 
-    c4, c5, c6 = st.columns(3)
-    c4.info("Decision Justification")
-    c5.info("JSON Report")
-    c6.info("Pilot Requests")
+    st.header("Core Features")
+
+    f1, f2, f3 = st.columns(3)
+    f1.info("Live Prediction Tool")
+    f2.info("Risk Dashboard")
+    f3.info("Interactive Map")
+
+    f4, f5, f6 = st.columns(3)
+    f4.info("Alert System")
+    f5.info("Decision Justification")
+    f6.info("JSON Report")
+
+
 elif page == "Live Prediction Tool":
     st.title("Live Prediction Tool")
-    st.caption("Enter exact city/location and date, then generate a HydroPyro risk estimate.")
 
     with st.form("prediction_form"):
         place = st.text_input("Exact city / location", "Thessaloniki")
 
-        col1, col2, col3 = st.columns(3)
-
-        day = col1.number_input("Day", min_value=1, max_value=31, value=1)
-        month = col2.number_input("Month", min_value=1, max_value=12, value=5)
-        year = col3.number_input("Year", min_value=2000, max_value=2035, value=2026)
+        c1, c2, c3 = st.columns(3)
+        day = c1.number_input("Day", min_value=1, max_value=31, value=1)
+        month = c2.number_input("Month", min_value=1, max_value=12, value=5)
+        year = c3.number_input("Year", min_value=2000, max_value=2035, value=2026)
 
         submitted = st.form_submit_button("Generate Prediction")
 
@@ -656,21 +619,22 @@ elif page == "Live Prediction Tool":
             date_obj = datetime(int(year), int(month), int(day))
             date_str = date_obj.strftime("%Y-%m-%d")
 
-            with st.spinner("Fetching coordinates, weather data, NASA image and running HydroPyro..."):
+            with st.spinner("Running HydroPyro..."):
                 lat, lon, city = get_coords(place)
                 raw_weather_df = fetch_weather_dataframe(lat, lon, date_obj)
                 weather = normalize_weather(raw_weather_df)
                 img = fetch_nasa_image(lat, lon, date_obj)
+
                 probs, model_status = run_prediction(img, weather, raw_weather_df)
 
                 output = build_hydropyro_output(
-                    city=city,
-                    lat=lat,
-                    lon=lon,
-                    date_str=date_str,
-                    probs=probs,
-                    raw_weather_df=raw_weather_df,
-                    model_status=model_status
+                    city,
+                    lat,
+                    lon,
+                    date_str,
+                    probs,
+                    raw_weather_df,
+                    model_status
                 )
 
             st.session_state.result = {
@@ -696,10 +660,10 @@ elif page == "Live Prediction Tool":
 
         st.header("Risk Dashboard")
 
-        col1, col2, col3 = st.columns(3)
-        col1.metric("NORMAL", f"{output['risk_scores']['normal_probability'] * 100:.1f}%")
-        col2.metric("FIRE", f"{output['risk_scores']['fire_probability'] * 100:.1f}%")
-        col3.metric("FLOOD", f"{output['risk_scores']['flood_probability'] * 100:.1f}%")
+        m1, m2, m3 = st.columns(3)
+        m1.metric("NORMAL", f"{output['risk_scores']['normal_probability'] * 100:.1f}%")
+        m2.metric("FIRE", f"{output['risk_scores']['fire_probability'] * 100:.1f}%")
+        m3.metric("FLOOD", f"{output['risk_scores']['flood_probability'] * 100:.1f}%")
 
         d1, d2, d3, d4, d5, d6 = st.columns(6)
         d1.metric("Dominant", output["dominant_output"])
@@ -713,9 +677,6 @@ elif page == "Live Prediction Tool":
         fmap = create_folium_map(lat, lon, city, output)
         st_folium(fmap, width=1100, height=520)
 
-        st.header("Alert System")
-        st.warning(output["alert"])
-
         st.header("Recommended Action")
         st.write(output["recommended_action"])
 
@@ -723,7 +684,12 @@ elif page == "Live Prediction Tool":
         st.write(output["decision_justification"])
 
         with st.expander("Weather / Data Table"):
-            st.dataframe(raw_weather_df, use_container_width=True)
+            st.dataframe(raw_weather_df, width="stretch")
+
+        with st.expander("Model Debug"):
+            st.write("Files in repository:")
+            st.write(os.listdir("."))
+            st.write("TFLite exists:", os.path.exists(TFLITE_MODEL))
 
         st.header("Download Report")
         report_json = json.dumps(output, indent=2, ensure_ascii=False)
@@ -735,70 +701,42 @@ elif page == "Live Prediction Tool":
             mime="application/json"
         )
 
-        st.info("PDF report can be added later. Current MVP exports JSON.")
-
-
-
 
 elif page == "Business Model":
     st.title("Business Model")
 
-    st.header("Pilot Project Section")
-
-    st.markdown(
+    st.header("Pilot Project")
+    st.write(
         """
-        **Pilot Project includes:**
-        - Selected municipality / region monitoring
-        - Wildfire and flood risk dashboard
-        - Location/date predictions
-        - Map-based visualization
-        - JSON reporting
-        - Pilot feedback loop
+        Pilot includes selected-region monitoring, wildfire/flood risk dashboard,
+        map-based visualization, JSON reports and decision-support outputs.
 
-        **Suggested duration:** 2–3 months  
-        **For:** municipalities, civil protection, utilities, insurers, environmental agencies and infrastructure operators.
+        Suggested duration: 2–3 months.
         """
     )
 
-    st.button("Request Pilot")
-
     st.header("Pricing / Plans")
 
-    col1, col2, col3 = st.columns(3)
-
-    col1.info("Pilot Project\n\nEntry pilot for selected region")
-    col2.info("Annual Subscription\n\nContinuous risk dashboard access")
-    col3.info("Premium Analytics\n\nAdvanced reports, integrations and custom analysis")
+    p1, p2, p3 = st.columns(3)
+    p1.info("Pilot Project")
+    p2.info("Annual Subscription")
+    p3.info("Premium Analytics")
 
     st.header("Target Customers")
-
     st.write(
         """
-        Municipalities, civil protection agencies, utilities, insurers, environmental agencies,
-        infrastructure operators and regional climate-risk teams.
+        Municipalities, civil protection agencies, utilities, insurers,
+        environmental agencies and infrastructure operators.
         """
     )
 
     st.header("Use Cases")
-
     st.write(
         """
         - Wildfire risk for municipalities
         - Flood risk for cities
         - Infrastructure protection
         - Insurance risk documentation
-        - Environmental early-warning support
-        """
-    )
-
-    st.header("How It Works")
-
-    st.write(
-        """
-        1. Input location and date  
-        2. Fetch weather / environmental / satellite data  
-        3. Run AI prediction  
-        4. Produce map, report and recommended action  
         """
     )
 
@@ -806,105 +744,59 @@ elif page == "Business Model":
 elif page == "Technology & Transparency":
     st.title("Technology & Data Transparency")
 
-    st.header("Technology Section")
-
+    st.header("Technology")
     st.write(
         """
-        HydroPyro uses satellite imagery, weather APIs, CNN-LSTM / machine-learning architecture,
-        geospatial processing and environmental risk intelligence.
+        HydroPyro combines satellite imagery, weather APIs, machine learning,
+        geospatial visualization and environmental decision intelligence.
         """
     )
 
     st.header("Data Sources")
-
     st.write(
         """
         - Open-Meteo geocoding and weather/archive API
-        - NASA Worldview Snapshots / GIBS-style satellite imagery
+        - NASA Worldview / GIBS-style snapshot imagery
         - User-selected city/location and date
         """
     )
 
-    st.header("Update Frequency")
-
-    st.write(
-        """
-        Weather and forecast availability depends on API access and date selection.
-        Historical data uses archive endpoints; future dates use forecast endpoints.
-        """
-    )
-
-    st.header("Model Limitations")
-
+    st.header("Limitations")
     st.warning(
         """
-        HydroPyro MVP is a decision-support tool. It must not replace official meteorological,
-        hydrological, firefighting or civil-protection warnings.
+        HydroPyro is an MVP decision-support tool.
+        It must not replace official meteorological, hydrological, firefighting
+        or civil-protection warnings.
         """
     )
 
 
 elif page == "Partnerships":
-    st.title("Partnerships & Credibility")
+    st.title("Partnerships")
 
-    st.header("About Founder / Team")
-
+    st.header("About Founder")
     st.write(
         """
-        **Angelos Kalafatas**  
-        Chemistry graduate with interests in environmental analysis, analytical chemistry,
+        Angelos Kalafatas — Chemistry graduate with interests in environmental analysis,
         AI-based environmental decision support and climate-risk intelligence.
         """
     )
 
-    st.header("Social Links")
+    st.header("Seeking Pilot Partners")
+    st.info("Municipalities, research groups, accelerators, environmental agencies and infrastructure operators.")
 
+    st.header("Case Study Examples")
     st.write(
         """
-        - GitHub: add your GitHub link  
-        - LinkedIn: add your LinkedIn link  
-        - Email: add your email  
-        - Instagram/X: optional  
-        """
-    )
-
-    st.header("Mobile App Section")
-
-    st.info("Google Play: Coming Soon — no fake download link until an actual app exists.")
-
-    st.header("Partnership Section")
-
-    st.write(
-        """
-        HydroPyro is seeking pilot partners:
-        - municipalities
-        - research groups
-        - accelerators
-        - environmental agencies
-        - infrastructure operators
-        """
-    )
-
-    st.header("Case Study / Demo Examples")
-
-    st.write(
-        """
-        Demo examples to include later:
         - Thessaly Flood 2023
         - Rhodes Fire 2023
         - Attica Fire example
         """
     )
 
-    st.header("Testimonials / Logos")
-
-    st.info("Seeking pilot partners — logos/testimonials will be added after real pilots.")
-
 
 elif page == "Contact / Legal":
     st.title("Contact / Legal / Trust")
-
-    st.header("Contact Form")
 
     with st.form("contact_form"):
         name = st.text_input("Name")
@@ -914,53 +806,34 @@ elif page == "Contact / Legal":
         region = st.text_input("Region")
         use_case = st.text_area("Use case")
         message = st.text_area("Message")
-
         gdpr = st.checkbox("I consent to be contacted about HydroPyro pilot opportunities.")
 
         sent = st.form_submit_button("Submit Contact Request")
 
     if sent:
         if not gdpr:
-            st.error("Please provide GDPR consent before submitting.")
+            st.error("Please provide GDPR consent.")
         else:
-            contact_payload = {
-                "name": name,
-                "organization": organization,
-                "email": email,
-                "role": role,
-                "region": region,
-                "use_case": use_case,
-                "message": message,
-                "gdpr_consent": gdpr,
-                "submitted_at": datetime.now().isoformat()
-            }
-
             st.success("Contact request captured in this session.")
-            st.json(contact_payload)
+            st.json(
+                {
+                    "name": name,
+                    "organization": organization,
+                    "email": email,
+                    "role": role,
+                    "region": region,
+                    "use_case": use_case,
+                    "message": message,
+                    "gdpr_consent": gdpr,
+                    "submitted_at": datetime.now().isoformat()
+                }
+            )
 
     st.header("Disclaimer")
-
     st.warning(
         """
-        HydroPyro is an MVP decision-support platform. It is not an official emergency alert system.
-        Always follow official civil-protection, meteorological, hydrological and firefighting authorities.
+        HydroPyro is not an official emergency alert system.
+        Always follow official authorities.
         """
     )
-
-    st.header("Privacy Policy")
-
-    st.write(
-        """
-        Contact-form data should only be used to respond to pilot or partnership requests.
-        A full privacy policy should be added before commercial launch.
-        """
-    )
-
-    st.header("Terms of Use")
-
-    st.write(
-        """
-        HydroPyro outputs are provided for informational and decision-support purposes only.
-        They do not constitute official emergency, insurance, legal or engineering advice.
-        """
-    )
+    
